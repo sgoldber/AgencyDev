@@ -1,0 +1,23 @@
+{
+  "testCommand": "npm test",
+  "linterCommand": "npm run lint",
+  "documentationStyle": "google",
+  "testFramework": "jest",
+  "coverageThreshold": 80,
+  "checkInterval": 30,
+  "aider": {
+    "model": "gpt-4-turbo-preview",
+    "temperature": 0.7,
+    "maxTokens": 4000,
+    "mapTokens": 1024
+  },
+  "vibeKanban": {
+    "projectName": "multi-agent-dev",
+    "updateInterval": 5
+  },
+  "costLimits": {
+    "dailyLimitUSD": 50.0,
+    "alertThresholdUSD": 40.0,
+    "resetTime": "00:00"
+  }
+}
