@@ -22,6 +22,12 @@ AIDER_MODEL=$(get_aider_model "$PREFERRED_MODEL" "gpt-4")
 CLEANUP_MODEL=$(get_aider_model "o3-mini" "$AIDER_MODEL")
 
 BRANCH=$(jq -r ".branch" "$STATE_FILE")
+AGENT_BRANCH=$(get_agent_branch "$BRANCH" "$AGENT_NAME")
+
+# Get agent branch names for merging
+DOC_BRANCH=$(get_agent_branch "$BRANCH" "doc-agent")
+TEST_BRANCH=$(get_agent_branch "$BRANCH" "test-agent")
+REVIEW_BRANCH=$(get_agent_branch "$BRANCH" "code-review-agent")
 
 # Find worktree directory using shared function
 WORKTREE_DIR=$(find_worktree "$AGENT_NAME" "$BRANCH")
@@ -64,21 +70,42 @@ if ! "$REPO_ROOT/scripts/check-api-quota.sh"; then
     exit 1
 fi
 
-# PRE-FLIGHT PULL
+# PRE-FLIGHT PULL: Fetch all agent branches and main branch
+echo "Pre-flight: Fetching all agent branches..."
 git fetch origin "$BRANCH" || {
     rm "$LOCK_FILE"
     exit 1
 }
-git reset --hard origin/"$BRANCH" || {
+git fetch origin "$DOC_BRANCH" 2>/dev/null || true
+git fetch origin "$TEST_BRANCH" 2>/dev/null || true
+git fetch origin "$REVIEW_BRANCH" 2>/dev/null || true
+git fetch origin "$AGENT_BRANCH" 2>/dev/null || true
+
+# Checkout cleanup branch
+git checkout "$AGENT_BRANCH" || {
+    echo "Error: Failed to checkout cleanup branch $AGENT_BRANCH" >&2
     rm "$LOCK_FILE"
     exit 1
+}
+
+# Merge all three agent branches into cleanup branch
+echo "Merging agent branches into cleanup branch..."
+git merge origin/"$DOC_BRANCH" --no-edit || {
+    echo "Warning: Merge conflict or error merging $DOC_BRANCH into $AGENT_BRANCH" >&2
+}
+git merge origin/"$TEST_BRANCH" --no-edit || {
+    echo "Warning: Merge conflict or error merging $TEST_BRANCH into $AGENT_BRANCH" >&2
+}
+git merge origin/"$REVIEW_BRANCH" --no-edit || {
+    echo "Warning: Merge conflict or error merging $REVIEW_BRANCH into $AGENT_BRANCH" >&2
 }
 
 # PRE-FLIGHT DEPENDENCY SYNC
 echo "Pre-flight: Checking and syncing dependencies..."
 sync_dependencies "$WORKTREE_DIR" "$AGENT_NAME"
 
-# Identify agent commits to squash
+# Identify agent commits to squash (from all merged agent branches)
+# Count commits from agent branches that aren't in main
 AGENT_COMMITS=$(git log --oneline origin/main..HEAD | grep -E "^(docs|test|review):" | wc -l)
 
 if [ "$AGENT_COMMITS" -eq 0 ]; then
@@ -133,15 +160,27 @@ if [ -z "$COMMIT_MSG" ]; then
     COMMIT_MSG="feat: Comprehensive feature update with documentation, tests, and code review"
 fi
 
-# Create the squashed commit
+# Create the squashed commit on cleanup branch
 git commit -m "$COMMIT_MSG"
 
 echo "Agent commits squashed into single commit: $(git rev-parse --short HEAD)"
 
-# Push the squashed commit
+# Merge cleanup branch back into main branch
+echo "Merging cleanup branch back into main branch..."
+git checkout "$BRANCH" || {
+    echo "Error: Failed to checkout main branch $BRANCH" >&2
+    rm "$LOCK_FILE"
+    exit 1
+}
+git merge "$AGENT_BRANCH" --no-edit || {
+    echo "Warning: Merge conflict or error merging $AGENT_BRANCH into $BRANCH" >&2
+    # Continue anyway - might need manual resolution
+}
+
+# Push the squashed commit to main branch
 if ! retry_git_push "$BRANCH" 5; then
-    echo "Error: Failed to push squashed commit after multiple attempts. Manual intervention required." >&2
-    log_event "error" "$AGENT_NAME" "push_failed" "Failed to push squashed commit after 5 attempts" "$(git rev-parse HEAD)" 0
+    echo "Error: Failed to push main branch $BRANCH after multiple attempts. Manual intervention required." >&2
+    log_event "error" "$AGENT_NAME" "push_failed" "Failed to push $BRANCH after 5 attempts" "$(git rev-parse HEAD)" 0
     rm "$LOCK_FILE"
     exit 1
 fi

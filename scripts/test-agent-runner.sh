@@ -11,6 +11,7 @@ source "$(dirname "$0")/lib/common.sh"
 
 TEST_CMD=$(jq -r '.testCommand' "$REPO_ROOT/.agent-config.json")
 BRANCH=$(jq -r ".branch" "$STATE_FILE")
+AGENT_BRANCH=$(get_agent_branch "$BRANCH" "$AGENT_NAME")
 
 # Find worktree directory using shared function
 WORKTREE_DIR=$(find_worktree "$AGENT_NAME" "$BRANCH")
@@ -22,11 +23,7 @@ fi
 
 cd "$WORKTREE_DIR"
 
-# Wait for doc-agent to finish
-while [ -f "$REPO_ROOT/.agent-state/locks/doc-agent.lock" ]; do
-    echo "Waiting for doc-agent to finish..."
-    sleep 5
-done
+# Agents run in parallel - no need to wait for doc-agent
 
 # Check for refinement requests (developer feedback)
 FEEDBACK_DIR="$REPO_ROOT/.agent-state/feedback"
@@ -81,9 +78,24 @@ fi
 
 # PRE-FLIGHT PULL
 echo "Pre-flight: Syncing worktree with remote..."
+# Fetch both main branch and agent branch
 git fetch origin "$BRANCH" || {
     rm "$LOCK_FILE"
     exit 1
+}
+git fetch origin "$AGENT_BRANCH" 2>/dev/null || true
+
+# Checkout agent branch and merge main branch into it
+git checkout "$AGENT_BRANCH" || {
+    echo "Error: Failed to checkout agent branch $AGENT_BRANCH" >&2
+    rm "$LOCK_FILE"
+    exit 1
+}
+
+# Merge main branch into agent branch to get latest changes
+git merge origin/"$BRANCH" --no-edit || {
+    echo "Warning: Merge conflict or error merging $BRANCH into $AGENT_BRANCH" >&2
+    # Continue anyway - might be first run
 }
 
 # Handle refinement mode vs normal mode
@@ -96,6 +108,7 @@ if [ "$REFINEMENT_MODE" = true ]; then
     fi
     
     echo "Refinement mode: Checking out commit $REFINEMENT_COMMIT"
+    # In refinement mode, checkout the specific commit (might be in detached HEAD)
     git checkout "$REFINEMENT_COMMIT" || {
         echo "Error: Could not checkout refinement commit $REFINEMENT_COMMIT" >&2
         log_event "error" "$AGENT_NAME" "refinement_checkout_failed" "Failed to checkout refinement commit" "$REFINEMENT_COMMIT" 0
@@ -126,7 +139,9 @@ This is refinement iteration $REFINEMENT_ITERATION. Please ensure your tests add
         TEST_FILES="test/"
     fi
 else
-    git reset --hard origin/"$BRANCH" || {
+    # Normal mode: ensure we're on agent branch (already done above, but verify)
+    git checkout "$AGENT_BRANCH" || {
+        echo "Error: Failed to checkout agent branch $AGENT_BRANCH" >&2
         rm "$LOCK_FILE"
         exit 1
     }
@@ -134,6 +149,7 @@ else
     echo "Pre-flight: Checking and syncing dependencies..."
     sync_dependencies "$WORKTREE_DIR" "$AGENT_NAME"
     
+    # Get latest commit from main branch (what we're monitoring)
     LATEST_COMMIT=$(git rev-parse origin/"$BRANCH")
     
     LAST_COMMIT=$(jq -r ".agents.${AGENT_NAME}.lastProcessedCommit" "$STATE_FILE")
@@ -220,9 +236,10 @@ if [ $TEST_EXIT -ne 0 ]; then
 fi
 
 # RETRY-ON-PUSH-FAIL
-if ! retry_git_push "$BRANCH" 5; then
-    echo "Error: Failed to push after multiple attempts. Manual intervention required." >&2
-    log_event "error" "$AGENT_NAME" "push_failed" "Failed to push after 5 attempts" "$ACTUAL_COMMIT" 0
+# Push to agent branch, not main branch
+if ! retry_git_push "$AGENT_BRANCH" 5; then
+    echo "Error: Failed to push to agent branch $AGENT_BRANCH after multiple attempts. Manual intervention required." >&2
+    log_event "error" "$AGENT_NAME" "push_failed" "Failed to push to $AGENT_BRANCH after 5 attempts" "$ACTUAL_COMMIT" 0
     rm "$LOCK_FILE"
     exit 1
 fi

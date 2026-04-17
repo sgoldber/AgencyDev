@@ -26,7 +26,8 @@ This system implements a multi-agent architecture where specialized AI agents wo
 
 1. **aider**: AI coding assistant CLI tool
    ```bash
-   pip install aider-chat
+   pip install aider-install
+   aider-install
    ```
 
 2. **vibe-kanban**: Kanban board for AI agent orchestration
@@ -49,7 +50,8 @@ This system implements a multi-agent architecture where specialized AI agents wo
 
 ```bash
 # Install aider
-pip install aider-chat
+pip install aider-install
+aider-install
 
 # Install Node.js (if not already installed)
 # macOS:

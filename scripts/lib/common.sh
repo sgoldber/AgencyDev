@@ -159,6 +159,19 @@ get_changed_files() {
     echo "$CHANGED_FILES"
 }
 
+# Function to get agent-specific branch name
+get_agent_branch() {
+    local BRANCH=$1
+    local AGENT=$2
+    case "$AGENT" in
+        "doc-agent") echo "$BRANCH-doc" ;;
+        "test-agent") echo "$BRANCH-test" ;;
+        "code-review-agent") echo "$BRANCH-review" ;;
+        "cleanup-agent") echo "$BRANCH-cleanup" ;;
+        *) echo "$BRANCH" ;;
+    esac
+}
+
 # Function to validate agent configuration
 validate_config() {
     local CONFIG_FILE="$REPO_ROOT/.agent-config.json"
@@ -294,6 +307,9 @@ find_worktree() {
     local AGENT_NAME=$1
     local BRANCH=$2
     
+    # Get agent-specific branch name
+    local AGENT_BRANCH=$(get_agent_branch "$BRANCH" "$AGENT_NAME")
+    
     # First check state.json for stored path
     local STORED_PATH=$(jq -r ".agents.${AGENT_NAME}.worktreePath // empty" "$STATE_FILE" 2>/dev/null)
     if [ -n "$STORED_PATH" ] && [ "$STORED_PATH" != "null" ] && [ -d "$STORED_PATH/.git" ]; then
@@ -304,10 +320,15 @@ find_worktree() {
     # Fallback 1: Check standard location
     local WORKTREE_DIR="$REPO_ROOT/$AGENT_NAME"
     if [ -d "$WORKTREE_DIR/.git" ]; then
-        # Store in state for future lookups
-        update_state "$AGENT_NAME" "worktreePath" "$WORKTREE_DIR"
-        echo "$WORKTREE_DIR"
-        return 0
+        # Verify it's on the correct agent branch
+        cd "$WORKTREE_DIR"
+        CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "")
+        if [ "$CURRENT_BRANCH" = "$AGENT_BRANCH" ]; then
+            # Store in state for future lookups
+            update_state "$AGENT_NAME" "worktreePath" "$WORKTREE_DIR"
+            echo "$WORKTREE_DIR"
+            return 0
+        fi
     fi
     
     # Fallback 2: Look up from vibe-kanban task metadata
@@ -320,9 +341,9 @@ find_worktree() {
         fi
     fi
     
-    # Fallback 3: Find by branch name using git worktree list --porcelain
+    # Fallback 3: Find by agent-specific branch name using git worktree list --porcelain
     WORKTREE_DIR=$(git -C "$REPO_ROOT/staging" worktree list --porcelain 2>/dev/null | \
-        awk -v branch="$BRANCH" '/^worktree/ {path=$2} /^HEAD/ {if ($2==branch) {print path; exit}; path=""}')
+        awk -v branch="$AGENT_BRANCH" '/^worktree/ {path=$2} /^HEAD/ {if ($2==branch) {print path; exit}; path=""}')
     
     if [ -n "$WORKTREE_DIR" ] && [ -d "$WORKTREE_DIR/.git" ]; then
         update_state "$AGENT_NAME" "worktreePath" "$WORKTREE_DIR"

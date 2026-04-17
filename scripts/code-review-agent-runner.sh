@@ -20,6 +20,7 @@ PREFERRED_MODEL=$(jq -r '.aider.model // "gpt-4-turbo-preview"' "$REPO_ROOT/.age
 AIDER_MODEL=$(get_aider_model "$PREFERRED_MODEL" "gpt-4")
 
 BRANCH=$(jq -r ".branch" "$STATE_FILE")
+AGENT_BRANCH=$(get_agent_branch "$BRANCH" "$AGENT_NAME")
 
 # Find worktree directory using shared function
 WORKTREE_DIR=$(find_worktree "$AGENT_NAME" "$BRANCH")
@@ -33,11 +34,7 @@ fi
 cd "$WORKTREE_DIR"
 log_event "info" "$AGENT_NAME" "worktree_found" "Using worktree: $WORKTREE_DIR" "" 0
 
-# Wait for test-agent to finish
-while [ -f "$REPO_ROOT/.agent-state/locks/test-agent.lock" ]; do
-    echo "Waiting for test-agent to finish..."
-    sleep 5
-done
+# Agents run in parallel - no need to wait for test-agent
 
 # Check for refinement requests
 FEEDBACK_DIR="$REPO_ROOT/.agent-state/feedback"
@@ -92,9 +89,24 @@ fi
 
 # PRE-FLIGHT PULL
 echo "Pre-flight: Syncing worktree with remote..."
+# Fetch both main branch and agent branch
 git fetch origin "$BRANCH" || {
     rm "$LOCK_FILE"
     exit 1
+}
+git fetch origin "$AGENT_BRANCH" 2>/dev/null || true
+
+# Checkout agent branch and merge main branch into it
+git checkout "$AGENT_BRANCH" || {
+    echo "Error: Failed to checkout agent branch $AGENT_BRANCH" >&2
+    rm "$LOCK_FILE"
+    exit 1
+}
+
+# Merge main branch into agent branch to get latest changes
+git merge origin/"$BRANCH" --no-edit || {
+    echo "Warning: Merge conflict or error merging $BRANCH into $AGENT_BRANCH" >&2
+    # Continue anyway - might be first run
 }
 
 # Handle refinement mode vs normal mode
@@ -140,7 +152,9 @@ Generate a CODE_REVIEW.md file with:
 
 This is refinement iteration $REFINEMENT_ITERATION. Please ensure your review addresses the developer's concerns."
 else
-    git reset --hard origin/"$BRANCH" || {
+    # Normal mode: ensure we're on agent branch (already done above, but verify)
+    git checkout "$AGENT_BRANCH" || {
+        echo "Error: Failed to checkout agent branch $AGENT_BRANCH" >&2
         rm "$LOCK_FILE"
         exit 1
     }
@@ -148,6 +162,7 @@ else
     echo "Pre-flight: Checking and syncing dependencies..."
     sync_dependencies "$WORKTREE_DIR" "$AGENT_NAME"
     
+    # Get latest commit from main branch (what we're monitoring)
     LATEST_COMMIT=$(git rev-parse origin/"$BRANCH")
     
     LAST_COMMIT=$(jq -r ".agents.${AGENT_NAME}.lastProcessedCommit" "$STATE_FILE")
@@ -163,6 +178,7 @@ else
         exit 0
     fi
     
+    # Get changed files from main branch
     CHANGED_FILES=$(get_changed_files "$LAST_COMMIT" "$BRANCH")
     
     AIDER_PROMPT="Perform a comprehensive code review on recently changed files:
@@ -217,9 +233,10 @@ track_api_cost "$AIDER_MODEL"
 ACTUAL_COMMIT=$(git rev-parse HEAD)
 
 # RETRY-ON-PUSH-FAIL
-if ! retry_git_push "$BRANCH" 5; then
-    echo "Error: Failed to push after multiple attempts. Manual intervention required." >&2
-    log_event "error" "$AGENT_NAME" "push_failed" "Failed to push after 5 attempts" "$ACTUAL_COMMIT" 0
+# Push to agent branch, not main branch
+if ! retry_git_push "$AGENT_BRANCH" 5; then
+    echo "Error: Failed to push to agent branch $AGENT_BRANCH after multiple attempts. Manual intervention required." >&2
+    log_event "error" "$AGENT_NAME" "push_failed" "Failed to push to $AGENT_BRANCH after 5 attempts" "$ACTUAL_COMMIT" 0
     rm "$LOCK_FILE"
     exit 1
 fi

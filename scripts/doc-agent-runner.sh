@@ -24,6 +24,7 @@ PREFERRED_MODEL=$(jq -r '.aider.model // "gpt-4-turbo-preview"' "$REPO_ROOT/.age
 AIDER_MODEL=$(get_aider_model "$PREFERRED_MODEL" "gpt-4")
 
 BRANCH=$(jq -r ".branch" "$STATE_FILE")
+AGENT_BRANCH=$(get_agent_branch "$BRANCH" "$AGENT_NAME")
 
 # Find worktree directory (may be created by vibe-kanban with dynamic name)
 WORKTREE_DIR=$(find_worktree "$AGENT_NAME" "$BRANCH")
@@ -121,9 +122,24 @@ fi
 # PRE-FLIGHT PULL: Ensure worktree is up-to-date before aider runs
 # This prevents stale branch issues when agent is already running
 echo "Pre-flight: Syncing worktree with remote..."
+# Fetch both main branch and agent branch
 git fetch origin "$BRANCH" || {
     rm "$LOCK_FILE"
     exit 1
+}
+git fetch origin "$AGENT_BRANCH" 2>/dev/null || true
+
+# Checkout agent branch and merge main branch into it
+git checkout "$AGENT_BRANCH" || {
+    echo "Error: Failed to checkout agent branch $AGENT_BRANCH" >&2
+    rm "$LOCK_FILE"
+    exit 1
+}
+
+# Merge main branch into agent branch to get latest changes
+git merge origin/"$BRANCH" --no-edit || {
+    echo "Warning: Merge conflict or error merging $BRANCH into $AGENT_BRANCH" >&2
+    # Continue anyway - might be first run
 }
 
 # Handle refinement mode vs normal mode
@@ -165,20 +181,27 @@ Please redo your documentation work with the following in mind:
 
 This is refinement iteration $REFINEMENT_ITERATION. Please ensure your changes address the developer's concerns."
 else
-    # Normal mode: Reset to latest branch state
-    git reset --hard origin/"$BRANCH" || {
+    # Normal mode: ensure we're on agent branch and merge main branch
+    git checkout "$AGENT_BRANCH" || {
+        echo "Error: Failed to checkout agent branch $AGENT_BRANCH" >&2
         rm "$LOCK_FILE"
         exit 1
+    }
+    
+    # Merge main branch into agent branch to get latest changes
+    git merge origin/"$BRANCH" --no-edit || {
+        echo "Warning: Merge conflict or error merging $BRANCH into $AGENT_BRANCH" >&2
+        # Continue anyway - might be first run or no changes
     }
     
     # PRE-FLIGHT DEPENDENCY SYNC: Ensure dependencies are up-to-date
     echo "Pre-flight: Checking and syncing dependencies..."
     sync_dependencies "$WORKTREE_DIR" "$AGENT_NAME"
     
-    # Get latest commit
+    # Get latest commit from main branch (what we're monitoring)
     LATEST_COMMIT=$(git rev-parse origin/"$BRANCH")
     
-    # Get changed files since last processed commit
+    # Get changed files since last processed commit (from main branch)
     CHANGED_FILES=$(get_changed_files "$LAST_COMMIT" "$BRANCH" "source")
     
     # Create normal prompt
@@ -238,8 +261,9 @@ fi
 track_api_cost "$AIDER_MODEL"
 
 # RETRY-ON-PUSH-FAIL: Handle git race conditions with better error messages
-if ! retry_git_push "$BRANCH" 5; then
-    echo "Error: Failed to push after multiple attempts. Manual intervention required." >&2
+# Push to agent branch, not main branch
+if ! retry_git_push "$AGENT_BRANCH" 5; then
+    echo "Error: Failed to push to agent branch $AGENT_BRANCH after multiple attempts. Manual intervention required." >&2
     rm "$LOCK_FILE"
     exit 1
 fi
